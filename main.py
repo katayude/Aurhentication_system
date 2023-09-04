@@ -24,12 +24,35 @@ class HomeServer(pykka.ThreadingActor):
         if(self.order == "Send_License_Plate"):
             print("(Home_AKA)Generate_Key")
             self.license_plate = message["license_plate"]
-            self.Generate_Key()
+            self.Generate_Authentication_Vector()
 
-    def Generate_Key(self):
+    
+    def Generate_Authentication_Vector(self):
+        print("(Home_AKAG)Generate_Authentication_Vector")
         self.key = 0x00112233445566778899aabbccddeeff - self.license_plate
-        self.PUC_ref.tell({"order":"Send_Registration_Complete_Message",
-                            "key":self.key})
+        self.RAND = secrets.randbelow(2**128)
+        self.AMF = 0x1122
+        self.OP = 0x00112233445566778899aabbccddeeff
+        self.SQN = secrets.randbelow(2**48)
+        ##0x5566778899aa
+        self.SQN += 1
+        print(f'SQN: {self.SQN}')
+        self.Generate_XRES_MAC()
+
+    
+    def Generate_XRES_MAC(self):
+        print("(Home_AKA)Generate_XRES_MAC")
+        self.XRES = Create_RES(self.key, self.RAND, self.OP)
+        self.MAC = Create_MAC(self.key, self.RAND, self.AMF, self.OP, self.SQN)
+        print(f'XRES: {self.XRES}')
+        print(f'MAC: {self.MAC}')
+        self.Send_Authentication_Vector()
+        
+
+    def Send_Authentication_Vector(self):
+        self.PUC_ref.tell({"order":"Send_Authentication_Vector", "RAND":self.RAND, "AMF":self.AMF, "OP":self.OP, "SQN": self.SQN, "MAC":self.MAC, "XRES":self.XRES})
+
+        
 
 class PUC(pykka.ThreadingActor):
     def __init__(self):
@@ -51,10 +74,14 @@ class PUC(pykka.ThreadingActor):
             self.license_plate = self.message["license_plate"]
             self.Send_License_Plate()
 
-        elif(self.order == "Send_Registration_Complete_Message"):
-            print("(Home_AKA)Determine_RAND_AMF_SN_SQN")
-            self.key = message["key"]
-            self.Dtermine_RAND_AMF_OP_SQN()
+        elif(self.order == "Send_Authentication_Vector"):
+            self.RAND = self.message["RAND"]
+            self.AMF = self.message["AMF"]
+            self.OP = self.message["OP"]
+            self.SQN = self.message["SQN"]
+            self.XRES = self.message["XRES"]
+            self.MAC = self.message["MAC"]
+            self.Extract_RAND_AMF_SN_SQN_XRES_MAC()
 
         elif(self.order == "Forward_Encrypted_RES"):
             self.SQN += 1
@@ -80,24 +107,12 @@ class PUC(pykka.ThreadingActor):
     def Send_License_Plate(self):
         self.HomeServer_ref.tell({"order":"Send_License_Plate", "license_plate":self.license_plate})
 
-    def Dtermine_RAND_AMF_OP_SQN(self):
-        self.RAND = secrets.randbelow(2**128)
-        self.AMF = 0x1122
-        self.OP = 0x00112233445566778899aabbccddeeff
-        self.SQN = secrets.randbelow(2**48)
-        ##0x5566778899aa
-        self.SQN += 1
-        print(f'SQN: {self.SQN}')
-        self.Generate_XRES_XMAC()
 
-    
-    def Generate_XRES_XMAC(self):
-        print("(Home_AKA)Generate_XRES_XMAC")
-        self.XRES = Create_RES(self.key, self.RAND, self.OP)
-        self.XMAC = Create_MAC(self.key, self.RAND, self.AMF, self.OP, self.SQN)
-        print(f'XRES: {self.XRES}')
-        print(f'XMAC: {self.XMAC}')
-        self.Send_RAND_AMF_SQN_XMAC_1()
+    def Extract_RAND_AMF_SN_SQN_XRES_MAC(self):
+        print("(Home_AKA)Extract_RAND_AMF_SN_SQN_XRES_MAC")
+        self.SmartMeter_ref.tell({"order":"Send_RAND_AMF_SQN_MAC_to_SM", "RAND":self.RAND, "AMF":self.AMF, "OP":self.OP, "SQN": self.SQN, "MAC":self.MAC})
+        
+
 
     def Generate_Local_XRES_XMAC(self):
         print("(PUC_AKA)Generate_XRES_XMAC")
@@ -111,8 +126,6 @@ class PUC(pykka.ThreadingActor):
     def Send_RAND_AMF_SQN_XMAC_1(self):
         self.SmartMeter_ref.tell({"order":"Send_RAND_AMF_SQN_XMAC_1", "RAND":self.RAND, "AMF":self.AMF, "OP":self.OP, "SQN": self.SQN, "XMAC":self.XMAC})
 
-    def Send_local_RAND_AMF_SQN_XMAC_1(self):
-        self.SmartMeter_ref.tell({"order":"Send_local_RAND_AMF_SQN_XMAC_1", "RAND":self.RAND, "AMF":self.AMF, "OP":self.OP, "SQN": self.SQN, "local_XMAC":self.local_XMAC})
 
     def Compare_RES_and_XRES(self):
         if(self.XRES == self.RES):
@@ -161,14 +174,14 @@ class SmartMeter(pykka.ThreadingActor):
             self.license_plate = message["license_plate"]
             self.Get_License_Plate()
 
-        elif self.order == "Send_RAND_AMF_SQN_XMAC_1" :
+        elif self.order == "Send_RAND_AMF_SQN_MAC_to_SM" :
             print('(Home_AKA)Send_RAND_AMF_SQN_XMAC')
             self.RAND = self.message["RAND"]
             self.AMF = self.message["AMF"]
             self.OP = self.message["OP"]
             self.SQN = self.message["SQN"]
-            self.XMAC = self.message["XMAC"]
-            self.Send_RAND_AMF_SQN_XMAC_2()
+            self.MAC = self.message["MAC"]
+            self.Send_RAND_AMF_SQN_MAC_to_EV()
 
         elif self.order == "Send_Encrypted_RES":
             print("(Home_AKA)Forward_Encrypted_RES")
@@ -199,8 +212,8 @@ class SmartMeter(pykka.ThreadingActor):
     def Get_License_Plate(self):
         self.PUC_ref.tell({"order":"Get_License_Plate", "license_plate":self.license_plate})
 
-    def Send_RAND_AMF_SQN_XMAC_2(self):
-        self.ElectricVehicle_ref.tell({"order":"Send_RAND_AMF_SQN_XMAC_2", "RAND":self.RAND, "AMF":self.AMF, "OP":self.OP, "SQN": self.SQN, "XMAC":self.XMAC})
+    def Send_RAND_AMF_SQN_MAC_to_EV(self):
+        self.ElectricVehicle_ref.tell({"order":"Send_RAND_AMF_SQN_MAC_to_EV", "RAND":self.RAND, "AMF":self.AMF, "OP":self.OP, "SQN": self.SQN, "MAC":self.MAC})
 
     def Send_local_RAND_AMF_SQN_XMAC_2(self):
         self.ElectricVehicle_ref.tell({"order":"Send_local_RAND_AMF_SQN_XMAC_2", "RAND":self.RAND, "AMF":self.AMF, "OP":self.OP, "SQN": self.SQN, "local_XMAC":self.local_XMAC})
@@ -231,13 +244,13 @@ class ElectricVehicle(pykka.ThreadingActor):
         self.message = message
         self.order = message["order"]
 
-        if self.order == "Send_RAND_AMF_SQN_XMAC_2":
+        if self.order == "Send_RAND_AMF_SQN_MAC_to_EV":
             print("(Home_AKA)Generate_RES_AK_CK_IK_MAC")
             self.RAND = self.message["RAND"]
             self.AMF = self.message["AMF"]
             self.OP = self.message["OP"]
             self.SQN = self.message["SQN"]
-            self.XMAC = self.message["XMAC"]
+            self.MAC = self.message["MAC"]
             self.Generate_key()
             self.Generate_RES_AK_CK_IK_MAC()
 
@@ -256,13 +269,13 @@ class ElectricVehicle(pykka.ThreadingActor):
 
     def Generate_RES_AK_CK_IK_MAC(self):
         self.RES = Create_RES(self.key, self.RAND, self.OP)
-        self.MAC = Create_MAC(self.key, self.RAND, self.AMF, self.OP, self.SQN)
+        self.XMAC = Create_MAC(self.key, self.RAND, self.AMF, self.OP, self.SQN)
         self.AK = Create_AK(self.key, self.RAND, self.OP)
         self.CK = Create_CK(self.key, self.RAND, self.OP)
         self.IK = Create_IK(self.key, self.RAND, self.OP)
 
         print(f'RES: {self.RES}')
-        print(f'MAC: {self.MAC}')
+        print(f'XMAC: {self.XMAC}')
         print(f'AK: {self.AK}')
         print(f'CK: {self.CK}')
         print(f'IK: {self.IK}')
@@ -500,15 +513,15 @@ def main():
     ElectricVehicle_proxy.link_class(SmartMeter_ref)
 
     #start communication
-    SmartMeter_ref.tell({"order":"start", "license_plate":720})
+    SmartMeter_ref.tell({"order":"start", "license_plate":721})
     
     time.sleep(1)
 
-    SmartMeter_ref.tell({"order":"start", "license_plate":721})
+    ##SmartMeter_ref.tell({"order":"start", "license_plate":721})
 
 
     time.sleep(5)
-    SmartMeter_ref.tell({"order":"local_start", "license_plate":721})
+    ##SmartMeter_ref.tell({"order":"local_start", "license_plate":721})
 
 
     time.sleep(5)
